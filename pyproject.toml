@@ -1,0 +1,43 @@
+[project]
+name = "devmind"
+version = "0.1.0"
+description = "Context-Aware Agentic Orchestration for Adaptive Edge-Cloud AI Inference"
+requires-python = ">=3.12"
+dependencies = [
+    "gymnasium>=1.0",
+    "numpy>=1.26",
+    "pydantic>=2.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "transformers>=4.47",
+    "scikit-learn>=1.6",
+    "prometheus-client>=0.21",
+    "matplotlib>=3.10",
+    "pandas>=2.2",
+    "datasets>=3.0",
+    "torch>=2.5",
+    "torchvision",
+    "torchaudio",
+]
+
+[project.scripts]
+devmind-train = "devmind.trainer:main"
+devmind-eval = "devmind.evaluation:main"
+devmind-gateway = "devmind.gateway.app:main"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchvision = [{ index = "pytorch-cpu" }]
+torchaudio = [{ index = "pytorch-cpu" }]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
