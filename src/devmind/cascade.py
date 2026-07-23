@@ -19,6 +19,8 @@ class RequestOutcome:
     fallback_triggered: bool
     action: Action
     confidence_raw: float
+    sla_margin_ms: float = 0.0
+    trust_score: float = 1.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -30,6 +32,8 @@ class RequestOutcome:
             "fallback_triggered": self.fallback_triggered,
             "action": self.action.name,
             "confidence_raw": self.confidence_raw,
+            "sla_margin_ms": self.sla_margin_ms,
+            "trust_score": self.trust_score,
         }
 
 
@@ -67,6 +71,8 @@ class CascadeController:
             fallback_triggered=fallback,
             action=action,
             confidence_raw=confidence_raw,
+            sla_margin_ms=report.sla_margin_ms,
+            trust_score=report.trust_score,
         )
 
     def _dispatch(self, action: Action, confidence: float, bronze: BronzeMetricSnapshot) -> tuple[str, float, float]:

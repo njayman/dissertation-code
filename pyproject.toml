@@ -24,6 +24,7 @@ dependencies = [
 devmind-train = "devmind.trainer:main"
 devmind-eval = "devmind.evaluation:main"
 devmind-gateway = "devmind.gateway.app:main"
+devmind-ablation7 = "devmind.orchestrator:main_ablation_7"
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

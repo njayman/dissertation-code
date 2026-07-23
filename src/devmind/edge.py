@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 
+from devmind.medallion import EWMA
 from devmind.models import EdgeContextReport, OperationalState, ResourceStress
 
 
@@ -49,12 +50,21 @@ class EdgeDevice:
         self._resource_stress = ResourceStress()
         self._error_buffer: list[bool] = []
         self._last_report: EdgeContextReport | None = None
+        # Longer-horizon trust score (Component 7 evidence): distinct time
+        # constant from the 60-sample error_rate_1m, "does this pod's track
+        # record earn routing to it," not "is it wrong right now."
+        self._trust_ewma = EWMA(alpha=0.05)
 
     @property
     def last_report(self) -> EdgeContextReport | None:
         return self._last_report
 
-    def emit_report(self, confidence_raw: float, is_correct: bool | None = None) -> EdgeContextReport:
+    def emit_report(
+        self,
+        confidence_raw: float,
+        is_correct: bool | None = None,
+        sla_budget_ms: float = 300.0,
+    ) -> EdgeContextReport:
         cpu = self._resource_stress.cpu
         thermal = self._resource_stress.thermal
         calibrated = confidence_raw - compute_calibration_delta(confidence_raw, cpu, thermal)
@@ -68,6 +78,11 @@ class EdgeDevice:
 
         state = self.classifier.predict(self._resource_stress, error_rate)
 
+        # The edge's own claim that it can meet the SLA locally: predicted
+        # local latency (same proxy cascade.py's dispatch uses) vs budget.
+        predicted_local_latency_ms = 50.0 + cpu * 30.0 + thermal * 10.0
+        sla_margin_ms = sla_budget_ms - predicted_local_latency_ms
+
         self._last_report = EdgeContextReport(
             resource_stress=ResourceStress(**{
                 k: getattr(self._resource_stress, k) for k in ["cpu", "gpu", "memory", "disk_io", "thermal"]
@@ -77,6 +92,8 @@ class EdgeDevice:
             confidence_calibrated=calibrated,
             calibration_delta=delta,
             error_rate_1m=error_rate,
+            sla_margin_ms=sla_margin_ms,
+            trust_score=self._trust_ewma.value if self._trust_ewma._value is not None else 1.0,
         )
         return self._last_report
 
@@ -92,3 +109,4 @@ class EdgeDevice:
         self._error_buffer.append(accuracy < 0.5)
         if len(self._error_buffer) > 60:
             self._error_buffer.pop(0)
+        self._trust_ewma.update(1.0 if (sla_met and accuracy >= 0.5) else 0.0)

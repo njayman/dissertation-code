@@ -39,6 +39,10 @@ class EdgeContextReport:
     confidence_calibrated: float = 0.0
     calibration_delta: float = 0.0
     error_rate_1m: float = 0.0
+    # Evidence-only fields (Component 7 governance): not fed into the trained
+    # 13-slot Gold vector, so adding them can't change PPO input shape.
+    sla_margin_ms: float = 0.0
+    trust_score: float = 1.0
 
 
 @dataclass
