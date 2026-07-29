@@ -23,6 +23,8 @@ class EvalMetrics:
     escalation_rate: float = 0.0
     energy_mj: float = 0.0
     fallback_rate: float = 0.0
+    sla_margin_ms: float = 0.0
+    trust_score: float = 1.0
 
 
 def run_episode(
@@ -34,6 +36,8 @@ def run_episode(
     done = False
     accuracies: list[float] = []
     latencies: list[float] = []
+    sla_margins: list[float] = []
+    trust_scores: list[float] = []
     violations = 0
     escalations = 0
     total = 0
@@ -57,6 +61,10 @@ def run_episode(
                 violations += 1
         if action == 1:
             escalations += 1
+        if hasattr(env, "_edge_device") and env._edge_device.last_report is not None:
+            report = env._edge_device.last_report
+            sla_margins.append(report.sla_margin_ms)
+            trust_scores.append(report.trust_score)
     pbar.close()
 
     latencies = np.array(latencies)
@@ -67,6 +75,8 @@ def run_episode(
         escalation_rate=escalations / max(total, 1),
         energy_mj=env._state.energy_mj if hasattr(env._state, "energy_mj") else 0.0,
         fallback_rate=fallbacks / max(total, 1),
+        sla_margin_ms=float(np.mean(sla_margins)) if sla_margins else 0.0,
+        trust_score=float(np.mean(trust_scores)) if trust_scores else 1.0,
     )
 
 
@@ -75,9 +85,6 @@ def always_edge(gold: GoldStateVector) -> tuple[int, bool]:
 
 
 def always_cloud(gold: GoldStateVector) -> tuple[int, bool]:
-    # Stands in for FrugalGPT (Chen et al., 2023) and HybridLLM (Ding et al.,
-    # 2024) too: both assume effectively infinite cloud capacity, i.e. no
-    # queue/RTT-aware routing at all, which is exactly what always-cloud is.
     return 1, False
 
 
@@ -91,28 +98,7 @@ def random_policy(gold: GoldStateVector) -> tuple[int, bool]:
     return int(np.random.default_rng().integers(0, 2)), False
 
 
-# ---------------------------------------------------------------------------
-# Literature-review baselines.
-#
-# None of the cited systems has a pretrained artifact that fits this task
-# (see plan doc / supervisor conversation): BranchyNet/MSDNet/SPINN target
-# vision models with no text path, RouteLLM's released routers are trained on
-# Chatbot-Arena win-rate data between two specific chat LLMs (a different
-# signal than toxicity-confidence routing), Splitwise is a cluster-level GPU
-# scheduler simulator not a per-request model, and EdgeBERT/PROTEUS/the
-# NSGA-II router are systems/optimization papers with no distributable
-# checkpoint. Each function below instead reproduces that paper's DECISION
-# LOGIC - which signals it is allowed to see, and what class of rule it
-# applies - evaluated on this project's own GoldStateVector/env harness. This
-# is a baseline comparison, not a reproduction of each paper's original
-# training pipeline, RL algorithm, or evolutionary search.
-# ---------------------------------------------------------------------------
-
-
 def branchynet_entropy(tau: float = 0.6) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """BranchyNet (Teerapittayanon et al., 2016): confidence only, exits on
-    binary entropy of the prediction vs. a threshold - the paper's actual
-    exit criterion, not raw confidence like static_threshold."""
     def policy(gold: GoldStateVector) -> tuple[int, bool]:
         p = min(max(gold[0], 1e-6), 1.0 - 1e-6)
         entropy = -(p * np.log2(p) + (1 - p) * np.log2(1 - p))
@@ -121,9 +107,6 @@ def branchynet_entropy(tau: float = 0.6) -> Callable[[GoldStateVector], tuple[in
 
 
 def msdnet_budget(tau: float = 0.6, budget_ms: float = 200.0) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """MSDNet (Huang et al., 2018): confidence + a FIXED compute budget
-    (their hardware timer budget), never the live per-request SLA
-    (sla_remaining, slot 3) this project tracks."""
     def policy(gold: GoldStateVector) -> tuple[int, bool]:
         predicted_rtt_ms = gold[2] * 1000.0
         can_afford = predicted_rtt_ms <= budget_ms
@@ -132,11 +115,6 @@ def msdnet_budget(tau: float = 0.6, budget_ms: float = 200.0) -> Callable[[GoldS
 
 
 def edgebert_dvfs(tau: float = 0.6, cpu_limit: float = 0.7) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """EdgeBERT (Tambe et al., 2021): confidence + local edge CPU load only,
-    no cloud-side signal at all. When the edge is already CPU-stressed it
-    stays local (proxy for their DVFS-based local scheduling) rather than
-    escalating - structurally unable to catch Failure B (confident wrong
-    answer under CPU stress), which is the point of the comparison."""
     def policy(gold: GoldStateVector) -> tuple[int, bool]:
         escalate = gold[0] < tau and gold[4] < cpu_limit
         return (1 if escalate else 0), False
@@ -144,8 +122,6 @@ def edgebert_dvfs(tau: float = 0.6, cpu_limit: float = 0.7) -> Callable[[GoldSta
 
 
 def spinn_connectivity(tau: float = 0.6, rtt_limit_ms: float = 500.0) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """SPINN (Laskaridis et al., 2020): confidence + a STATIC binary
-    connectivity flag derived from RTT, no live queue depth, no SLA."""
     def policy(gold: GoldStateVector) -> tuple[int, bool]:
         predicted_rtt_ms = gold[2] * 1000.0
         connected = predicted_rtt_ms <= rtt_limit_ms
@@ -154,12 +130,6 @@ def spinn_connectivity(tau: float = 0.6, rtt_limit_ms: float = 500.0) -> Callabl
 
 
 def proteus_accuracy_floor(target_acc: float = 0.85) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """PROTEUS (Bhatti et al., 2026): confidence only, optimizing to keep
-    accuracy above a floor and ignoring latency/SLA entirely (their "SLA" is
-    an accuracy floor, not a latency deadline). With a single available
-    signal this reduces to the same threshold-on-confidence mechanics as
-    static_threshold - the real difference is what the threshold represents
-    (a dialed accuracy target vs. a hand-picked cutoff), not the arithmetic."""
     def policy(gold: GoldStateVector) -> tuple[int, bool]:
         return (1 if gold[0] < target_acc else 0), False
     return policy
@@ -168,9 +138,6 @@ def proteus_accuracy_floor(target_acc: float = 0.85) -> Callable[[GoldStateVecto
 def splitwise_queue_energy(
     queue_wait_limit_s: float = 0.3, energy_stress_limit: float = 0.6
 ) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """Splitwise (Patel et al., 2024): cloud queue pressure + an energy-stress
-    proxy only - no confidence signal, no per-request SLA deadline, matching
-    the paper's cluster-granularity, no-per-request-deadline design."""
     def policy(gold: GoldStateVector) -> tuple[int, bool]:
         queue_ok = gold[1] <= queue_wait_limit_s
         resource_stress_avg = float(np.mean([gold[5], gold[6], gold[7], gold[8], gold[9]]))
@@ -182,12 +149,6 @@ def splitwise_queue_energy(
 def _fit_routellm_learned_router(
     scenario: ScenarioConfig, max_samples: int = 300, edge_model: DistilBERTEdge | None = None, cloud_model: BERTLargeCloud | None = None
 ) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """RouteLLM (Ong et al., 2024): confidence only, but via a TRAINED
-    single-feature classifier rather than a hand-set threshold - the
-    "learned but single-signal" contrast against this project's multi-signal
-    PPO. Fits offline on a warm-up rollout (always-edge policy, so every
-    sample's correctness is observed) using sklearn, already a dependency
-    via edge.py's MiscalibrationClassifier."""
     from sklearn.linear_model import LogisticRegression
 
     env = make_env(scenario, max_samples, edge_model, cloud_model)
@@ -196,7 +157,7 @@ def _fit_routellm_learned_router(
     done = False
     while not done:
         confidence = float(state[0])
-        state, _, done, _, _ = env.step(0)  # always_edge, so accuracy reflects this confidence
+        state, _, done, _, _ = env.step(0)
         X.append([confidence])
         y.append(1 if env._state._last_accuracy >= 0.5 else 0)
 
@@ -216,13 +177,6 @@ def _fit_nsga2_pareto_rule(
     cloud_model: BERTLargeCloud | None = None,
     weights: tuple[float, float, float] = (0.5, 0.3, 0.2),
 ) -> Callable[[GoldStateVector], tuple[int, bool]]:
-    """NSGA-II router (Yu, Goudarzi and Toosi, 2025): confidence + queue +
-    energy, tuned via a small offline grid search over a weighted-sum proxy
-    for the multi-objective Pareto front (accuracy, SLA violations, energy)
-    rather than a genuine multi-objective genetic algorithm. Flag this
-    fidelity gap explicitly if reviewers push back - swapping in a real
-    NSGA-II search (e.g. pymoo) over the same weighted objectives is the
-    upgrade path."""
     taus = np.linspace(0.1, 0.95, 18)
     best_tau, best_score = 0.6, -1e9
     for tau in taus:
@@ -271,6 +225,19 @@ def make_env(scenario: ScenarioConfig, max_samples: int = 1000, edge_model: Dist
     return InferenceGatewayEnv(scenario, max_samples=max_samples, edge_model=edge_model, cloud_model=cloud_model)
 
 
+def average_metrics(metrics_list: list[EvalMetrics]) -> EvalMetrics:
+    return EvalMetrics(
+        accuracy=float(np.mean([m.accuracy for m in metrics_list])),
+        p95_latency=float(np.mean([m.p95_latency for m in metrics_list])),
+        sla_violation_rate=float(np.mean([m.sla_violation_rate for m in metrics_list])),
+        escalation_rate=float(np.mean([m.escalation_rate for m in metrics_list])),
+        energy_mj=float(np.mean([m.energy_mj for m in metrics_list])),
+        fallback_rate=float(np.mean([m.fallback_rate for m in metrics_list])),
+        sla_margin_ms=float(np.mean([m.sla_margin_ms for m in metrics_list])),
+        trust_score=float(np.mean([m.trust_score for m in metrics_list])),
+    )
+
+
 def evaluate_baselines(scenario: ScenarioConfig, n_runs: int = 1, max_samples: int = 1000, edge_model: DistilBERTEdge | None = None, cloud_model: BERTLargeCloud | None = None) -> dict[str, EvalMetrics]:
     baselines = {
         "always_edge": always_edge,
@@ -289,14 +256,7 @@ def evaluate_baselines(scenario: ScenarioConfig, n_runs: int = 1, max_samples: i
             )
             for _ in range(n_runs)
         ]
-        results[name] = EvalMetrics(
-            accuracy=float(np.mean([m.accuracy for m in metrics_list])),
-            p95_latency=float(np.mean([m.p95_latency for m in metrics_list])),
-            sla_violation_rate=float(np.mean([m.sla_violation_rate for m in metrics_list])),
-            escalation_rate=float(np.mean([m.escalation_rate for m in metrics_list])),
-            energy_mj=float(np.mean([m.energy_mj for m in metrics_list])),
-            fallback_rate=float(np.mean([m.fallback_rate for m in metrics_list])),
-        )
+        results[name] = average_metrics(metrics_list)
     return results
 
 
@@ -317,10 +277,6 @@ def run_ablation(scenario: ScenarioConfig, policy_path: str = "ppo_policy.pt", m
         return (1 if gold[0] < 0.6 else 0), False
     results["run2_confidence_only"] = run_episode(env2, confidence_only, desc=f"{scenario.name}/run2_confidence_only")
 
-    # Run 3: 5 standard signals + calibration_delta, isolates Edge Context
-    # Protocol / Failure B coverage. Heuristic proxy (not a separately
-    # retrained PPO on a sliced state) - escalate on confidence OR a large
-    # calibration gap, whichever fires first.
     env3 = make_env(scenario, max_samples, edge_model, cloud_model)
     def confidence_plus_calibration(gold: GoldStateVector) -> tuple[int, bool]:
         calibration_drift = gold[10] if gold.mask[10] else 0.0
@@ -331,9 +287,6 @@ def run_ablation(scenario: ScenarioConfig, policy_path: str = "ppo_policy.pt", m
         env3, confidence_plus_calibration, desc=f"{scenario.name}/run3_calibration_delta"
     )
 
-    # Run 4: forward loop only, no reflect. Bidirectional loop value -
-    # edge.update_from_outcome/error-rate feedback is disabled so
-    # error_rate_1m never reflects real mistakes.
     env4 = make_env(scenario, max_samples, edge_model, cloud_model)
     env4.use_reflect = False
     results["run4_no_reflect"] = run_episode(env4, ppo_policy(load_agent()), desc=f"{scenario.name}/run4_no_reflect")
@@ -342,8 +295,6 @@ def run_ablation(scenario: ScenarioConfig, policy_path: str = "ppo_policy.pt", m
 
 
 def run_holdout_ablation(max_samples: int = 1000, policy_path: str = "ppo_policy.pt", edge_model: DistilBERTEdge | None = None, cloud_model: BERTLargeCloud | None = None) -> EvalMetrics:
-    # Run 6: held-out traffic scenario never seen in training - robustness
-    # to unseen operating points (domain randomization check).
     import torch
     env = make_env(ScenarioConfig.held_out(), max_samples, edge_model, cloud_model)
     ppo = PPONetwork()

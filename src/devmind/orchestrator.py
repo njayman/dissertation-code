@@ -1,22 +1,3 @@
-"""Policy Orchestration Layer (Component 7).
-
-Sits above the PPO Agent (agent.py) and the Bidirectional Loop. Where the
-Bidirectional Loop improves ONE deployed policy from its own outcome history,
-this layer answers a fleet-level question at client onboarding / drift-detection
-time: does an existing policy in the library already cover this client's
-traffic scenario (reuse), does it need adapting (fine-tune), or is nothing in
-the library close enough (train new)?
-
-Runs offline/governance-time only - never in the per-request fast loop. The
-per-request perception-reason-act-reflect loop in agent.py is untouched; it
-always executes one already-assigned frozen policy.
-
-Every decision is evaluated in the existing Gymnasium simulator using the
-existing evaluation harness (EvalMetrics: accuracy, P95 latency, SLA
-violation rate, escalation rate, energy) and written to an append-only
-decision log, this is the evidence trail for "why does this client run this
-policy."
-"""
 
 from __future__ import annotations
 
@@ -31,7 +12,7 @@ import torch
 
 from devmind.agent import AgenticOrchestrator, PPONetwork
 from devmind.environment import InferenceGatewayEnv, ScenarioConfig
-from devmind.evaluation import EvalMetrics, make_env, ppo_policy, run_episode
+from devmind.evaluation import EvalMetrics, average_metrics, make_env, ppo_policy, run_episode
 from devmind.trainer import PPOTrainer
 
 
@@ -51,8 +32,6 @@ class PolicyRecord:
 
 @dataclass
 class ToleranceThresholds:
-    """The 'task capacity' envelope (Kessler et al., Lifetime Policy Reuse,
-    arXiv:2106.01741) a policy must stay within to be reused as-is."""
 
     max_sla_violation_rate: float = 0.15
     min_accuracy: float = 0.80
@@ -70,11 +49,6 @@ def _meets_tolerance(m: EvalMetrics, t: ToleranceThresholds) -> bool:
 def select_decision(
     candidates: dict[str, EvalMetrics], thresholds: ToleranceThresholds
 ) -> tuple[PolicyDecision, str | None]:
-    """Pure promotion rule (champion-challenger style): reuse the best
-    in-tolerance policy, fine-tune the closest miss, or signal that a fresh
-    policy is needed if the library is empty. No I/O, no training - kept
-    separate from onboard() so the decision logic is unit-testable without a
-    simulator or GPU."""
     fits = {pid: m for pid, m in candidates.items() if _meets_tolerance(m, thresholds)}
     if fits:
         best = max(fits, key=lambda pid: fits[pid].accuracy - fits[pid].sla_violation_rate)
@@ -86,8 +60,6 @@ def select_decision(
 
 
 def dominant_signal(m: EvalMetrics, thresholds: ToleranceThresholds) -> str:
-    """Cheap explainability hook: which metric drove the decision, not a
-    SHAP-style attribution pass."""
     gaps = {
         "sla_violation_rate": m.sla_violation_rate - thresholds.max_sla_violation_rate,
         "accuracy": thresholds.min_accuracy - m.accuracy,
@@ -107,6 +79,7 @@ class PolicyOrchestrator:
         log_path: str | None = None,
         fine_tune_steps: int = 5_000,
         train_new_steps: int = 50_000,
+        eval_n_runs: int = 3,
     ):
         self.library_dir = library_dir
         self.thresholds = thresholds or ToleranceThresholds()
@@ -115,6 +88,7 @@ class PolicyOrchestrator:
         self._cloud_model = cloud_model
         self.fine_tune_steps = fine_tune_steps
         self.train_new_steps = train_new_steps
+        self.eval_n_runs = eval_n_runs
         self.log_path = log_path or os.path.join(
             os.path.dirname(__file__), "..", "..", "..", "docs", "evaluation", "orchestrator_decisions.jsonl"
         )
@@ -148,8 +122,15 @@ class PolicyOrchestrator:
         ppo = PPONetwork()
         ppo.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=True))
         agent = AgenticOrchestrator(ppo)
-        env = make_env(scenario, max_samples, self._edge_model, self._cloud_model)
-        return run_episode(env, ppo_policy(agent), desc=f"orchestrator/{scenario.name}")
+        metrics_list = [
+            run_episode(
+                make_env(scenario, max_samples, self._edge_model, self._cloud_model),
+                ppo_policy(agent),
+                desc=f"orchestrator/{scenario.name}",
+            )
+            for _ in range(self.eval_n_runs)
+        ]
+        return average_metrics(metrics_list)
 
     def _train(self, scenario: ScenarioConfig, total_steps: int, init_state_dict: dict | None = None) -> PPONetwork:
         env = InferenceGatewayEnv(scenario, edge_model=self._edge_model, cloud_model=self._cloud_model)
@@ -225,25 +206,30 @@ def run_ablation_7(
     train_new_steps: int = 50_000,
     edge_model: Any = None,
     cloud_model: Any = None,
+    eval_n_runs: int = 3,
 ) -> dict[str, Any]:
-    """Ablation Run 7: single shared policy across every client vs the Policy
-    Orchestration Layer choosing reuse/fine-tune/train-new per client. Isolates
-    the value of fleet-level governance (Component 7) from single-policy
-    generalisation, which Run 6's held-out scenario already measures."""
     shared_ppo = PPONetwork()
     shared_ppo.load_state_dict(torch.load(seed_policy_path, map_location="cpu", weights_only=True))
     shared_agent = AgenticOrchestrator(shared_ppo)
 
     shared_results: dict[str, EvalMetrics] = {}
     for client, scenario in CLIENT_SCENARIOS.items():
-        env = make_env(scenario, max_samples, edge_model, cloud_model)
-        shared_results[client] = run_episode(env, ppo_policy(shared_agent), desc=f"run7_shared/{client}")
+        metrics_list = [
+            run_episode(
+                make_env(scenario, max_samples, edge_model, cloud_model),
+                ppo_policy(shared_agent),
+                desc=f"run7_shared/{client}",
+            )
+            for _ in range(eval_n_runs)
+        ]
+        shared_results[client] = average_metrics(metrics_list)
 
     orch = PolicyOrchestrator(
         edge_model=edge_model,
         cloud_model=cloud_model,
         fine_tune_steps=fine_tune_steps,
         train_new_steps=train_new_steps,
+        eval_n_runs=eval_n_runs,
     )
     orch.register_seed_policy(
         "seed", seed_policy_path, validated_scenarios=["steady", "bursty", "degraded_network"]
@@ -264,9 +250,6 @@ def run_ablation_7(
 
 
 def main_ablation_7() -> None:
-    """Standalone entry point (like trainer.py's train_agent) since Run 7
-    trains real policies and shouldn't slow down every `devmind-eval` sweep.
-    Run explicitly: `uv run devmind-ablation7`."""
     import datetime
     import time
 

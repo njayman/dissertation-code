@@ -1,10 +1,42 @@
 from __future__ import annotations
 
+import time
+from dataclasses import dataclass, replace
+
 import numpy as np
+import psutil
 from sklearn.linear_model import LogisticRegression
 
 from devmind.medallion import EWMA
 from devmind.models import EdgeContextReport, OperationalState, ResourceStress
+
+_THERMAL_CRITICAL_C = 85.0
+
+
+@dataclass
+class ResourceMonitor:
+
+    disk_path: str = "/"
+
+    def __post_init__(self) -> None:
+        psutil.cpu_percent(interval=None)
+
+    def sample(self) -> ResourceStress:
+        cpu = psutil.cpu_percent(interval=None) / 100.0
+        memory = psutil.virtual_memory().percent / 100.0
+        disk = psutil.disk_usage(self.disk_path).percent / 100.0
+        return ResourceStress(cpu=cpu, gpu=0.0, memory=memory, disk_io=disk, thermal=self._read_thermal())
+
+    @staticmethod
+    def _read_thermal() -> float:
+        try:
+            temps = psutil.sensors_temperatures()
+        except (AttributeError, OSError):
+            return 0.0
+        readings = [t.current for entries in temps.values() for t in entries if t.current]
+        if not readings:
+            return 0.0
+        return float(min(max(readings) / _THERMAL_CRITICAL_C, 1.0))
 
 
 class MiscalibrationClassifier:
@@ -45,19 +77,36 @@ def compute_calibration_delta(confidence_raw: float, cpu: float, thermal: float)
 
 
 class EdgeDevice:
-    def __init__(self, classifier: MiscalibrationClassifier | None = None):
+    def __init__(self, classifier: MiscalibrationClassifier | None = None, stale_timeout_s: float = 5.0):
         self.classifier = classifier or MiscalibrationClassifier()
         self._resource_stress = ResourceStress()
         self._error_buffer: list[bool] = []
         self._last_report: EdgeContextReport | None = None
-        # Longer-horizon trust score (Component 7 evidence): distinct time
-        # constant from the 60-sample error_rate_1m, "does this pod's track
-        # record earn routing to it," not "is it wrong right now."
         self._trust_ewma = EWMA(alpha=0.05)
+        self.stale_timeout_s = stale_timeout_s
+        self._last_seen: float | None = None
 
     @property
     def last_report(self) -> EdgeContextReport | None:
+        if self._last_report is None:
+            return None
+        if self.is_unreachable:
+            return replace(self._last_report, operational_state=OperationalState.UNREACHABLE)
         return self._last_report
+
+    @property
+    def is_unreachable(self) -> bool:
+        if self._last_seen is None:
+            return True
+        return (time.monotonic() - self._last_seen) > self.stale_timeout_s
+
+    def mark_unreachable(self) -> None:
+        self._last_seen = None
+
+    def heartbeat(self, resource_stress: ResourceStress, sla_budget_ms: float = 300.0) -> EdgeContextReport:
+        self._resource_stress = resource_stress
+        last_confidence = self._last_report.confidence_raw if self._last_report else 0.5
+        return self.emit_report(last_confidence, is_correct=None, sla_budget_ms=sla_budget_ms)
 
     def emit_report(
         self,
@@ -78,8 +127,6 @@ class EdgeDevice:
 
         state = self.classifier.predict(self._resource_stress, error_rate)
 
-        # The edge's own claim that it can meet the SLA locally: predicted
-        # local latency (same proxy cascade.py's dispatch uses) vs budget.
         predicted_local_latency_ms = 50.0 + cpu * 30.0 + thermal * 10.0
         sla_margin_ms = sla_budget_ms - predicted_local_latency_ms
 
@@ -95,6 +142,7 @@ class EdgeDevice:
             sla_margin_ms=sla_margin_ms,
             trust_score=self._trust_ewma.value if self._trust_ewma._value is not None else 1.0,
         )
+        self._last_seen = time.monotonic()
         return self._last_report
 
     def apply_stress(self, **kwargs: float) -> None:
@@ -103,9 +151,6 @@ class EdgeDevice:
                 setattr(self._resource_stress, k, v)
 
     def update_from_outcome(self, latency_ms: float, sla_met: bool, accuracy: float) -> None:
-        # Backward loop: true label isn't known at emit_report() time in the real
-        # gateway path (only after dispatch), so feed the outcome's accuracy proxy
-        # into the same error buffer emit_report() reads next request.
         self._error_buffer.append(accuracy < 0.5)
         if len(self._error_buffer) > 60:
             self._error_buffer.pop(0)

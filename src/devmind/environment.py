@@ -26,8 +26,6 @@ class ScenarioConfig:
     name: str = "steady"
     base_rate: float = 4000.0
     burst_rate: float = 4000.0
-    # burst/degradation windows are fractions [0, 1] of episode progress,
-    # not wall-clock seconds, so short eval episodes still reach them.
     burst_start_frac: float = 1.1
     burst_duration_frac: float = 0.0
     degraded_start_frac: float = 1.1
@@ -36,6 +34,7 @@ class ScenarioConfig:
     rtt_degraded: float = 40.0
     edge_stress_prob: float = 0.1
     edge_degrade_prob: float = 0.02
+    edge_unreachable_prob: float = 0.01
     cloud_service_time_ms: float = 8.0
     sla_budget_ms: float = 300.0
 
@@ -95,6 +94,7 @@ class SimulationState:
     edge_correct: int = 0
     edge_total: int = 0
     cloud_total: int = 0
+    edge_unreachable_events: int = 0
     energy_mj: float = 0.0
     _drain_acc: float = 0.0
     _last_latency: float = 0.0
@@ -136,7 +136,10 @@ class InferenceGatewayEnv(gym.Env):
 
     def _setup_registry(self) -> None:
         def _read_edge() -> EdgeContextReport:
-            return self._last_report
+            report = self._edge_device.last_report
+            if report is None:
+                return EdgeContextReport(operational_state=OperationalState.UNREACHABLE)
+            return report
 
         def _read_queue() -> int:
             return self._state.cloud_queue
@@ -181,8 +184,12 @@ class InferenceGatewayEnv(gym.Env):
             thermal=self._rng.uniform(0, 0.2) + 0.1 * load_pct
             if self._rng.uniform() > self.scenario.edge_stress_prob * 0.7
             else self._rng.uniform(0.6, 0.9),
-            memory=self._rng.uniform(0.1, 0.4),
-            disk_io=self._rng.uniform(0.1, 0.2),
+            memory=self._rng.uniform(0.1, 0.4)
+            if self._rng.uniform() > self.scenario.edge_stress_prob * 0.5
+            else self._rng.uniform(0.7, 0.95),
+            disk_io=self._rng.uniform(0.1, 0.2)
+            if self._rng.uniform() > self.scenario.edge_stress_prob * 0.5
+            else self._rng.uniform(0.7, 0.9),
             gpu=self._rng.uniform(0.0, 0.3),
         )
         self._rtt = self._get_current_rtt()
@@ -196,7 +203,6 @@ class InferenceGatewayEnv(gym.Env):
         self._edge_device = EdgeDevice()
         self._silver = SilverEnricher()
         self._rng = np.random.default_rng(seed)
-        self._last_report = EdgeContextReport()
         self._rtt = self.scenario.rtt_base
         self._dataset.shuffle_train()
         bronze = self._build_bronze()
@@ -234,6 +240,12 @@ class InferenceGatewayEnv(gym.Env):
         true_label = sample.toxic
         sla = self.scenario.sla_budget_ms
 
+        if action in (Action.ROUTE_TO_EDGE, Action.QUERY_EXTENDED_CONTEXT):
+            if self._rng.uniform() < self.scenario.edge_unreachable_prob:
+                self._edge_device.mark_unreachable()
+                self._state.edge_unreachable_events += 1
+                action = Action.ESCALATE_TO_CLOUD
+
         perception_cost = 0.0
         if action in (Action.ROUTE_TO_EDGE, Action.QUERY_EXTENDED_CONTEXT):
             if action == Action.QUERY_EXTENDED_CONTEXT:
@@ -242,12 +254,13 @@ class InferenceGatewayEnv(gym.Env):
             self._state.edge_total += 1
             result = self._edge_model.predict(text, true_label)
             confidence = result.confidence
-            # Bidirectional loop ablation (Run 4): with use_reflect=False the
-            # edge never learns whether it was actually correct, so
-            # error_rate_1m stays frozen at whatever it already was.
             report = self._edge_device.emit_report(confidence, result.is_correct if self.use_reflect else None)
-            self._last_report = report
-            latency = result.latency_ms + self._rtt * 0.5
+            latency = (
+                result.latency_ms
+                + self._rtt * 0.5
+                + report.resource_stress.memory * 40.0
+                + report.resource_stress.disk_io * 40.0
+            )
             sla_met = latency <= sla
             energy = 0.5 + 0.3 * report.resource_stress.cpu
             accuracy = 1.0 if result.is_correct else 0.0
@@ -270,6 +283,8 @@ class InferenceGatewayEnv(gym.Env):
                 self._state.cloud_correct += 1
         else:
             return -0.05, 0.0, True, 0.0
+
+        self._edge_device.update_from_outcome(latency, sla_met, accuracy)
 
         reward = self._compute_reward(accuracy, latency, sla, sla_met, energy) - perception_cost
         self._state.energy_mj += energy

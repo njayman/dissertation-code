@@ -77,6 +77,7 @@ class SilverEnricher:
         ctx = bronze.edge_context
         is_degrading = ctx.operational_state == OperationalState.DEGRADING
         is_stressed = ctx.operational_state == OperationalState.STRESSED
+        is_unreachable = ctx.operational_state == OperationalState.UNREACHABLE
 
         drain_rate = bronze.cloud_queue_depth / max(bronze.sla_remaining_ms, 1)
         predicted_wait = self._queue_ewma.update(drain_rate) * bronze.sla_remaining_ms
@@ -97,6 +98,7 @@ class SilverEnricher:
             resource_stress_thermal=ctx.resource_stress.thermal,
             sla_violation_predicted=sla_pred,
             operational_state=ctx.operational_state,
+            stale=is_unreachable,
         )
 
         if is_stressed or is_degrading:

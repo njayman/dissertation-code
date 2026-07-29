@@ -137,11 +137,6 @@ class AgenticOrchestrator:
             action = Action.ESCALATE_TO_CLOUD if confidence < self.FALLBACK_THRESHOLD else Action.ROUTE_TO_EDGE
             return action, fallback
         if action == Action.QUERY_EXTENDED_CONTEXT:
-            # ponytail: proxy for "pull extended context then re-decide" -
-            # treated as route-to-edge-with-full-visibility (matches the
-            # training-time handling in environment.py). A real second
-            # forward pass over the revealed state is the upgrade path if
-            # ablation Run 5 shows this proxy underperforms.
             return Action.ROUTE_TO_EDGE, False
         return Action(action), False
 

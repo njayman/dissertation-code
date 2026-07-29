@@ -10,6 +10,7 @@ setup(
             "devmind-train=devmind.trainer:main",
             "devmind-eval=devmind.evaluation:main",
             "devmind-gateway=devmind.gateway.app:main",
+            "devmind-cloud=devmind.gateway.cloud_app:main",
         ],
     },
 )

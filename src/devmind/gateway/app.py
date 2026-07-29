@@ -1,22 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 
 import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from devmind.agent import AgenticOrchestrator, PPONetwork
-from devmind.cascade import CascadeController, RequestOutcome
-from devmind.edge import EdgeDevice, MiscalibrationClassifier
+from devmind.cascade import CascadeController
+from devmind.edge import EdgeDevice, ResourceMonitor
 from devmind.medallion import DynamicMetricRegistry, GoldNormalizer, MetricSource, SilverEnricher
-from devmind.model_clients import DistilBERTEdge
+from devmind.model_clients import CloudClient, DistilBERTEdge
 
 _DEFAULT_POLICY_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ppo_policy.pt")
+_TRAFFIC_WINDOW_S = 60.0
+_HEARTBEAT_INTERVAL_S = 2.0
 
 
 def _load_policy() -> PPONetwork:
@@ -35,7 +39,7 @@ def _load_policy() -> PPONetwork:
 class InferenceRequest(BaseModel):
     text: str
     sla_budget_ms: float = 300.0
-    edge_confidence: float | None = None
+    true_label: int | None = None
 
 
 class InferenceResponse(BaseModel):
@@ -47,24 +51,47 @@ class InferenceResponse(BaseModel):
     fallback_triggered: bool
 
 
+def _traffic_intensity(app: FastAPI) -> float:
+    override = os.environ.get("DEVMIND_TRAFFIC_OVERRIDE")
+    if override is not None:
+        return float(override)
+    now = time.time()
+    times = [t for t in app.state.request_times if now - t < _TRAFFIC_WINDOW_S]
+    app.state.request_times = times
+    return float(len(times)) * (60.0 / _TRAFFIC_WINDOW_S)
+
+
+async def _heartbeat_loop(edge: EdgeDevice, monitor: ResourceMonitor) -> None:
+    while True:
+        await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+        edge.heartbeat(monitor.sample())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.edge_model = DistilBERTEdge()
+    app.state.request_times = []
+    edge_model = DistilBERTEdge()
+    cloud_client = CloudClient(base_url=os.environ.get("DEVMIND_CLOUD_URL", "http://localhost:8001"))
     edge = EdgeDevice()
     registry = DynamicMetricRegistry()
     registry.register(MetricSource("edge_context", "EdgeContextReport", lambda: edge.last_report or edge.emit_report(0.5)))
-    registry.register(MetricSource("cloud_queue_depth", "int", lambda: 0))
-    registry.register(MetricSource("rtt_ms", "float", lambda: 40.0))
-    registry.register(MetricSource("sla_remaining_ms", "float", lambda: 300.0))
-    registry.register(MetricSource("energy_mj", "float", lambda: 0.0))
-    registry.register(MetricSource("traffic_intensity", "float", lambda: 4000.0))
+    registry.register(MetricSource("cloud_queue_depth", "int", lambda: cloud_client.inflight))
+    registry.register(MetricSource("rtt_ms", "float", lambda: cloud_client.rtt_ms))
+    registry.register(MetricSource("energy_mj", "float", lambda: float(os.environ.get("DEVMIND_ENERGY_MJ", 0.0))))
+    registry.register(MetricSource("traffic_intensity", "float", lambda: _traffic_intensity(app)))
 
     silver = SilverEnricher()
     gold = GoldNormalizer()
     agent = AgenticOrchestrator(_load_policy())
-    controller = CascadeController(agent, edge, registry, silver, gold)
+    controller = CascadeController(agent, edge, registry, silver, gold, edge_model, cloud_client)
     app.state.controller = controller
+    app.state.edge = edge
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(edge, ResourceMonitor()))
     yield
+    heartbeat_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await heartbeat_task
 
 
 app = FastAPI(title="DevMind Gateway", version="0.1.0", lifespan=lifespan)
@@ -73,18 +100,8 @@ app = FastAPI(title="DevMind Gateway", version="0.1.0", lifespan=lifespan)
 @app.post("/infer", response_model=InferenceResponse)
 async def infer(req: InferenceRequest) -> InferenceResponse:
     controller: CascadeController = app.state.controller
-    if req.edge_confidence is not None:
-        confidence = req.edge_confidence
-    else:
-        edge_model: DistilBERTEdge = app.state.edge_model
-        # ponytail: offload the blocking transformer forward pass to the
-        # default threadpool so it doesn't stall the event loop under
-        # concurrent requests. Move to a separate TorchServe-style process
-        # (like the cloud tier already implies) if throughput needs more
-        # than one process's worth of threads.
-        result = await asyncio.get_running_loop().run_in_executor(None, edge_model.predict, req.text)
-        confidence = result.confidence
-    outcome = controller.process(str(uuid.uuid4()), confidence)
+    app.state.request_times.append(time.time())
+    outcome = await controller.process(str(uuid.uuid4()), req.text, req.sla_budget_ms, req.true_label)
     return InferenceResponse(
         request_id=outcome.request_id,
         tier=outcome.tier,
@@ -98,6 +115,17 @@ async def infer(req: InferenceRequest) -> InferenceResponse:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "service": "devmind-gateway"}
+
+
+@app.get("/edge/status")
+async def edge_status() -> dict:
+    edge: EdgeDevice = app.state.edge
+    report = edge.last_report
+    return {
+        "unreachable": edge.is_unreachable,
+        "operational_state": report.operational_state.value if report else None,
+        "resource_stress": vars(report.resource_stress) if report else None,
+    }
 
 
 def main() -> None:

@@ -1,0 +1,20 @@
+services:
+  devmind-cloud:
+    build:
+      context: .
+      dockerfile: Dockerfile.cloud
+    image: devmind-cloud:test
+    ports:
+      - "8001:8001"
+
+  devmind-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    image: devmind-gateway:test
+    environment:
+      DEVMIND_CLOUD_URL: http://devmind-cloud:8001
+    ports:
+      - "8000:8000"
+    depends_on:
+      - devmind-cloud

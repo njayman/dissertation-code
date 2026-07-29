@@ -3,9 +3,11 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
-import numpy as np
+import httpx
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
+from devmind.medallion import EWMA
 
 
 @dataclass
@@ -45,3 +47,32 @@ class DistilBERTEdge(ModelClient):
 class BERTLargeCloud(ModelClient):
     def __init__(self, device: str = "cpu"):
         super().__init__("AnonymousCS/bert-large-uncased-Twitter-toxicity", device)
+
+
+class CloudClient:
+
+    def __init__(self, base_url: str, timeout: float = 5.0):
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.AsyncClient(timeout=timeout)
+        self._rtt = EWMA(alpha=0.2)
+        self._last_inflight = 0
+
+    async def predict(self, text: str, true_label: int | None = None) -> InferenceResult:
+        start = time.perf_counter()
+        resp = await self._client.post(
+            f"{self.base_url}/predict", json={"text": text, "true_label": true_label}
+        )
+        resp.raise_for_status()
+        latency = (time.perf_counter() - start) * 1000
+        self._rtt.update(latency)
+        data = resp.json()
+        self._last_inflight = data["inflight"]
+        return InferenceResult(confidence=data["confidence"], latency_ms=latency, is_correct=data["is_correct"])
+
+    @property
+    def rtt_ms(self) -> float:
+        return self._rtt.value or 40.0
+
+    @property
+    def inflight(self) -> int:
+        return self._last_inflight

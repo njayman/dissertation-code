@@ -17,6 +17,7 @@ class OperationalState(str, Enum):
     NOMINAL = "NOMINAL"
     STRESSED = "STRESSED"
     DEGRADING = "DEGRADING"
+    UNREACHABLE = "UNREACHABLE"
 
 
 @dataclass
@@ -39,8 +40,6 @@ class EdgeContextReport:
     confidence_calibrated: float = 0.0
     calibration_delta: float = 0.0
     error_rate_1m: float = 0.0
-    # Evidence-only fields (Component 7 governance): not fed into the trained
-    # 13-slot Gold vector, so adding them can't change PPO input shape.
     sla_margin_ms: float = 0.0
     trust_score: float = 1.0
 
@@ -55,7 +54,6 @@ class BronzeMetricSnapshot:
     energy_mj: float = 0.0
     traffic_intensity: float = 0.0
 
-    # config / metadata
     request_id: str = ""
 
 
@@ -77,6 +75,7 @@ class SilverFeatureVector:
     error_rate_1m: Optional[float] = None
     sla_violation_predicted: bool = False
     operational_state: OperationalState = OperationalState.NOMINAL
+    stale: bool = False
 
 
 @dataclass
@@ -107,6 +106,7 @@ class GoldStateVector:
             OperationalState.NOMINAL: 0.0,
             OperationalState.STRESSED: 0.5,
             OperationalState.DEGRADING: 1.0,
+            OperationalState.UNREACHABLE: 1.0,
         }
         slots = np.zeros(13, dtype=np.float32)
         mask = np.ones(13, dtype=np.float32)
@@ -129,6 +129,9 @@ class GoldStateVector:
             mask[10] = 0.0
         if silver.error_rate_1m is None:
             mask[11] = 0.0
+        if silver.stale:
+            slots[4:10] = 0.0
+            mask[4:10] = 0.0
 
         return cls(slots=slots, mask=mask)
 

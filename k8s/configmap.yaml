@@ -1,0 +1,10 @@
+# Test knobs for scenario replay (bursty / degraded-network) during AWS
+# testing. Leave both unset (delete the key) for real measured behavior.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: devmind-test-knobs
+  namespace: devmind
+data:
+  DEVMIND_ENERGY_MJ: "0"
+  # DEVMIND_TRAFFIC_OVERRIDE: "22000"

@@ -1,0 +1,82 @@
+[
+  {
+    "request_id": "30022469-b122-4678-b5db-0a2d38031808",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "d3bf3329-0586-4954-8130-c372c4f5d709",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "295645b0-caeb-49db-8e92-506ba7cc7ffd",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "5546dc09-efca-45e8-b28b-e0b0e2b20813",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "53a44931-7083-441c-a859-f8c729d3aa08",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "cd8aa38a-f2e6-4636-8d6e-395532b570bf",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "1eb9abba-4423-4e4e-aabe-e48eef2295b5",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "1ef70210-2fde-4932-9313-94bcad305e22",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "5ed93f01-b22f-4f89-a2dc-a1140882603e",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  },
+  {
+    "request_id": "00dc60a0-2cd6-4450-82f0-a22a243b5df9",
+    "tier": "cloud",
+    "confident": true,
+    "sla_met": true,
+    "latency_ms": 140.0,
+    "fallback_triggered": true
+  }
+]
