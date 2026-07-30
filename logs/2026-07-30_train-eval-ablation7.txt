@@ -1,20 +1,3 @@
-Session: retrain + re-evaluate after the edge-liveness / Component-7-evidence
-coverage fixes (deadman's switch simulated in environment.py, memory/disk
-latency coupling, trust_score wiring, average_metrics noise fix).
-
-Artefacts produced this session:
-  code/ppo_policy.pt                                  (retrained policy)
-  docs/evaluation/2026-07-30_01-41-50.{txt,json}       (devmind-eval)
-  docs/evaluation/run7_2026-07-30_02-12-04.{txt,json}  (devmind-ablation7)
-
-These are the canonical current-state results referenced by
-docs/results-explained.md, docs/code-explained.md, and docs/supervisor-defense.md.
-Superseded runs (pre-fix): 2026-07-29_23-38-06.*, run7_2026-07-30_00-21-43.*,
-run7_2026-07-30_00-40-30.* — keep for before/after comparison only, do not
-cite these in the dissertation.
-
-================================================================================
-
 ❯ uv run devmind-train
 Training PPO agent on steady scenario...
 Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
@@ -125,8 +108,8 @@ Policy               Acc      P95 Lat    SLA Viol   Esc%     Energy   Fallback
 run6_held_out        0.800    666.6      1.000      0.015    145.8    0.000
 
 Results saved:
-  docs/evaluation/2026-07-30_01-41-50.txt
-  docs/evaluation/2026-07-30_01-41-50.json
+  logs/2026-07-30_01-41-50.txt
+  logs/2026-07-30_01-41-50.json
 code on  main [!?] is 📦 v0.1.0 took 22m20s
 
 ❯ uv run devmind-ablation7
@@ -154,5 +137,5 @@ client_newco         0.820    122.2      0.000      0.067    70.2     0.000
 
 Per-client decisions: {'client_streamforge': 'reuse', 'client_nhs': 'reuse', 'client_babcock': 'fine_tune', 'client_newco': 'reuse'}
 
-Results saved to docs/evaluation/run7_2026-07-30_02-12-04.*
+Results saved to logs/run7_2026-07-30_02-12-04.*
 code on  main [!?] is 📦 v0.1.0 took 4m46s
