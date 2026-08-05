@@ -1,8 +1,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -13,6 +15,7 @@ import torch
 from devmind.agent import AgenticOrchestrator, PPONetwork
 from devmind.environment import InferenceGatewayEnv, ScenarioConfig
 from devmind.evaluation import EvalMetrics, average_metrics, make_env, ppo_policy, run_episode
+from devmind.models import EdgeContextReport, OperationalState
 from devmind.trainer import PPOTrainer
 
 
@@ -97,7 +100,9 @@ class PolicyOrchestrator:
     def register_seed_policy(self, policy_id: str, checkpoint_path: str, validated_scenarios: list[str]) -> None:
         self.library[policy_id] = PolicyRecord(policy_id, checkpoint_path, validated_scenarios)
 
-    def onboard(self, client: str, scenario: ScenarioConfig, max_samples: int = 500) -> PolicyDecision:
+    def onboard(
+        self, client: str, scenario: ScenarioConfig, max_samples: int = 500, trigger: str = "onboarding"
+    ) -> PolicyDecision:
         candidates = {
             pid: self._evaluate(rec.checkpoint_path, scenario, max_samples)
             for pid, rec in self.library.items()
@@ -115,7 +120,7 @@ class PolicyOrchestrator:
         if client not in rec.clients_assigned:
             rec.clients_assigned.append(client)
 
-        self._log_decision(client, scenario, candidates, decision, chosen)
+        self._log_decision(client, scenario, candidates, decision, chosen, trigger)
         return decision
 
     def _evaluate(self, checkpoint_path: str, scenario: ScenarioConfig, max_samples: int) -> EvalMetrics:
@@ -169,6 +174,7 @@ class PolicyOrchestrator:
         candidates: dict[str, EvalMetrics],
         decision: PolicyDecision,
         chosen: str,
+        trigger: str = "onboarding",
     ) -> None:
         signal = dominant_signal(candidates[chosen], self.thresholds) if chosen in candidates else "n/a_new_policy"
         entry = {
@@ -179,10 +185,49 @@ class PolicyOrchestrator:
             "decision": decision.value,
             "policy_assigned": chosen,
             "dominant_signal": signal,
+            "trigger": trigger,
         }
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
         with open(self.log_path, "a") as f:
             f.write(json.dumps(entry) + "\n")
+
+
+class DriftEventListener:
+    def __init__(
+        self,
+        orchestrator: PolicyOrchestrator,
+        trust_floor: float = 0.5,
+        recovery_window_s: float = 30.0,
+    ):
+        self.orchestrator = orchestrator
+        self.trust_floor = trust_floor
+        self.recovery_window_s = recovery_window_s
+        self._distress_since: dict[str, float] = {}
+        self._queue: asyncio.Queue[tuple[str, EdgeContextReport, float]] = asyncio.Queue()
+
+    def should_escalate(self, client_id: str, report: EdgeContextReport, now: float) -> bool:
+        distressed = report.operational_state in (OperationalState.DEGRADING, OperationalState.UNREACHABLE)
+        if not distressed or report.trust_score >= self.trust_floor:
+            self._distress_since.pop(client_id, None)
+            return False
+        first_seen = self._distress_since.setdefault(client_id, now)
+        if now - first_seen < self.recovery_window_s:
+            return False
+        self._distress_since.pop(client_id, None)
+        return True
+
+    def notify(self, client_id: str, report: EdgeContextReport) -> None:
+        self._queue.put_nowait((client_id, report, time.monotonic()))
+
+    async def run_forever(self, scenario_lookup: dict[str, ScenarioConfig], max_samples: int = 500) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            client_id, report, now = await self._queue.get()
+            scenario = scenario_lookup.get(client_id)
+            if scenario is not None and self.should_escalate(client_id, report, now):
+                await loop.run_in_executor(
+                    None, self.orchestrator.onboard, client_id, scenario, max_samples, "drift_detected"
+                )
 
 
 CLIENT_SCENARIOS: dict[str, ScenarioConfig] = {
@@ -300,6 +345,17 @@ def demo() -> None:
 
     assert dominant_signal(close_miss, t) == "accuracy"
     assert dominant_signal(good, t) == "within_tolerance"
+
+    listener = DriftEventListener(orchestrator=None, trust_floor=0.5, recovery_window_s=10.0)
+    nominal = EdgeContextReport(operational_state=OperationalState.NOMINAL, trust_score=0.9)
+    degrading_low_trust = EdgeContextReport(operational_state=OperationalState.DEGRADING, trust_score=0.2)
+    degrading_recovered = EdgeContextReport(operational_state=OperationalState.DEGRADING, trust_score=0.8)
+
+    assert not listener.should_escalate("c1", nominal, now=0.0)
+    assert not listener.should_escalate("c1", degrading_low_trust, now=100.0)
+    assert not listener.should_escalate("c1", degrading_low_trust, now=105.0)
+    assert listener.should_escalate("c1", degrading_low_trust, now=111.0)
+    assert not listener.should_escalate("c2", degrading_recovered, now=200.0)
 
     print("orchestrator self-check passed")
 

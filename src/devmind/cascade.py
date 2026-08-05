@@ -9,6 +9,7 @@ from devmind.edge import EdgeDevice
 from devmind.medallion import DynamicMetricRegistry, GoldNormalizer, SilverEnricher
 from devmind.model_clients import CloudClient, DistilBERTEdge, InferenceResult
 from devmind.models import Action, BronzeMetricSnapshot
+from devmind.orchestrator import DriftEventListener
 
 
 @dataclass
@@ -51,6 +52,8 @@ class CascadeController:
         edge_model: DistilBERTEdge,
         cloud_client: CloudClient,
         edge_timeout_s: float = 2.0,
+        client_id: str = "default",
+        drift_listener: DriftEventListener | None = None,
     ):
         self.agent = agent
         self.edge = edge
@@ -60,6 +63,8 @@ class CascadeController:
         self.edge_model = edge_model
         self.cloud_client = cloud_client
         self.edge_timeout_s = edge_timeout_s
+        self.client_id = client_id
+        self.drift_listener = drift_listener
 
     async def process(
         self,
@@ -83,6 +88,8 @@ class CascadeController:
             edge_result.is_correct if true_label is not None else None,
             sla_budget_ms,
         )
+        if self.drift_listener is not None:
+            self.drift_listener.notify(self.client_id, report)
         bronze = self.registry.snapshot()
         bronze.sla_budget_ms = sla_budget_ms
         bronze.sla_remaining_ms = sla_budget_ms
