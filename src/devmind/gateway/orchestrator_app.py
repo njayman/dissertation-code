@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 
@@ -84,6 +85,20 @@ async def list_clients() -> list[dict]:
     ]
 
 
+@app.get("/decisions")
+async def list_decisions() -> list[dict]:
+    orch: PolicyOrchestrator = app.state.orchestrator
+    if not os.path.exists(orch.log_path):
+        return []
+    entries = []
+    with open(orch.log_path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                entries.append(json.loads(line))
+    return entries
+
+
 @app.post("/clients")
 async def add_client(req: ClientRequest) -> dict:
     orch: PolicyOrchestrator = app.state.orchestrator
@@ -147,6 +162,18 @@ th, td { text-align: left; border-bottom: 1px solid #ccc; padding: 0.4rem; font-
   <tbody></tbody>
 </table>
 
+<h1>Decision Log</h1>
+<div style="overflow-x:auto">
+<table id="decisions-table">
+  <thead><tr>
+    <th>Timestamp</th><th>Client</th><th>Decision</th><th>Policy assigned</th>
+    <th>Accuracy</th><th>SLA violation</th><th>Escalation</th><th>Trust</th>
+    <th>Dominant signal</th><th>Trigger</th>
+  </tr></thead>
+  <tbody></tbody>
+</table>
+</div>
+
 <script>
 const scenarioSelect = document.getElementById("scenario-select");
 const customFields = document.getElementById("custom-fields");
@@ -166,6 +193,32 @@ async function refreshClients() {
   }
 }
 
+function fmtPct(x) { return x === undefined ? "-" : (x * 100).toFixed(1) + "%"; }
+function fmtNum(x) { return x === undefined ? "-" : x.toFixed(2); }
+
+async function refreshDecisions() {
+  const res = await fetch("/decisions");
+  const rows = await res.json();
+  const tbody = document.querySelector("#decisions-table tbody");
+  tbody.innerHTML = "";
+  for (const row of rows.slice().reverse()) {
+    const m = (row.candidates_evaluated && row.candidates_evaluated[row.policy_assigned]) || {};
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${row.timestamp}</td>
+      <td>${row.client}</td>
+      <td>${row.decision}</td>
+      <td>${row.policy_assigned}</td>
+      <td>${fmtNum(m.accuracy)}</td>
+      <td>${fmtPct(m.sla_violation_rate)}</td>
+      <td>${fmtPct(m.escalation_rate)}</td>
+      <td>${fmtNum(m.trust_score)}</td>
+      <td>${row.dominant_signal}</td>
+      <td>${row.trigger || "onboarding"}</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
 document.getElementById("add-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const form = new FormData(e.target);
@@ -180,9 +233,11 @@ document.getElementById("add-form").addEventListener("submit", async (e) => {
   const data = await res.json();
   resultEl.textContent = res.ok ? JSON.stringify(data, null, 2) : `Error: ${data.detail}`;
   await refreshClients();
+  await refreshDecisions();
 });
 
 refreshClients();
+refreshDecisions();
 </script>
 </body>
 </html>

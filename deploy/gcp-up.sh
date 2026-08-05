@@ -13,7 +13,22 @@ CLOUD_NAME="devmind-cloud"
 NEAR_NAME="devmind-edge-near"
 FAR_NAME="devmind-edge-far"
 
-MY_IP="$(curl -s https://ifconfig.me)/32"
+MY_IP_RAW="${MY_IP:-$(curl -4 -s --max-time 5 https://ifconfig.me || true)}"
+if [[ ! "$MY_IP_RAW" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+  echo "Could not determine your public IP (got: '$MY_IP_RAW')." >&2
+  echo "Set it explicitly and re-run, e.g.:  MY_IP=1.2.3.4 ./deploy/gcp-up.sh" >&2
+  exit 1
+fi
+MY_IP="${MY_IP_RAW}/32"
+
+region_of() { echo "${1%-*}"; }
+
+ensure_static_ip() {
+  local addr_name="$1" region="$2"
+  gcloud compute addresses describe "$addr_name" --region="$region" &>/dev/null || \
+    gcloud compute addresses create "$addr_name" --region="$region"
+  gcloud compute addresses describe "$addr_name" --region="$region" --format='get(address)'
+}
 
 create_instance() {
   local name="$1" zone="$2" machine="$3"; shift 3
@@ -21,11 +36,13 @@ create_instance() {
     echo "== $name already exists, skipping create =="
     return
   fi
-  echo "== Creating $name in $zone =="
+  local addr_ip
+  addr_ip="$(ensure_static_ip "${name}-ip" "$(region_of "$zone")")"
+  echo "== Creating $name in $zone (static IP $addr_ip) =="
   gcloud compute instances create "$name" \
     --zone="$zone" --machine-type="$machine" \
     --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud \
-    --boot-disk-size=50GB "$@"
+    --boot-disk-size=50GB --address="$addr_ip" "$@"
 }
 
 create_instance "$CLOUD_NAME" "$CLOUD_ZONE" e2-standard-2 --tags=devmind-cloud
@@ -53,15 +70,17 @@ NEAR_IP="$(gcloud compute instances describe "$NEAR_NAME" --zone="$NEAR_ZONE" --
 FAR_IP="$(gcloud compute instances describe "$FAR_NAME" --zone="$FAR_ZONE" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
 
 echo "== Locking down firewall to just these hosts =="
-gcloud compute firewall-rules create devmind-cloud-access \
-  --allow=tcp:8001 --target-tags=devmind-cloud \
-  --source-ranges="${NEAR_IP}/32,${FAR_IP}/32" 2>/dev/null || \
-  gcloud compute firewall-rules update devmind-cloud-access --source-ranges="${NEAR_IP}/32,${FAR_IP}/32"
-
-gcloud compute firewall-rules create devmind-dashboard-access \
-  --allow=tcp:8002 --target-tags=devmind-cloud \
-  --source-ranges="$MY_IP" 2>/dev/null || \
-  gcloud compute firewall-rules update devmind-dashboard-access --source-ranges="$MY_IP"
+create_or_update_firewall() {
+  local name="$1" port="$2" ranges="$3"
+  if gcloud compute firewall-rules describe "$name" &>/dev/null; then
+    gcloud compute firewall-rules update "$name" --source-ranges="$ranges"
+  else
+    gcloud compute firewall-rules create "$name" \
+      --allow="tcp:$port" --target-tags=devmind-cloud --source-ranges="$ranges"
+  fi
+}
+create_or_update_firewall devmind-cloud-access 8001 "${NEAR_IP}/32,${FAR_IP}/32"
+create_or_update_firewall devmind-dashboard-access 8002 "$MY_IP"
 
 echo "== Shipping code (tracked files + ppo_policy.pt) =="
 ship_code() {
