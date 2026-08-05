@@ -28,6 +28,7 @@ devmind-eval = "devmind.evaluation:main"
 devmind-gateway = "devmind.gateway.app:main"
 devmind-cloud = "devmind.gateway.cloud_app:main"
 devmind-ablation7 = "devmind.orchestrator:main_ablation_7"
+devmind-orchestrator = "devmind.gateway.orchestrator_app:main"
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

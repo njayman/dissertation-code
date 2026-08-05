@@ -83,7 +83,8 @@ async def lifespan(app: FastAPI):
     silver = SilverEnricher()
     gold = GoldNormalizer()
     agent = AgenticOrchestrator(_load_policy())
-    controller = CascadeController(agent, edge, registry, silver, gold, edge_model, cloud_client)
+    client_id = os.environ.get("DEVMIND_CLIENT_ID", "default")
+    controller = CascadeController(agent, edge, registry, silver, gold, edge_model, cloud_client, client_id=client_id)
     app.state.controller = controller
     app.state.edge = edge
 
@@ -129,7 +130,8 @@ async def edge_status() -> dict:
 
 
 def main() -> None:
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("DEVMIND_PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":
